@@ -163,8 +163,8 @@ def _extract_model_creds(creds: Dict[str, Any], model_type: str) -> Optional[Dic
 def _normalize_model_creds(creds: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "api_base": (
-            creds.get("api_base")
-            or creds.get("openai_api_base")
+            creds.get("openai_api_base")
+            or creds.get("api_base")
             or creds.get("url")
             or creds.get("base_url")
             or creds.get("endpoint")
