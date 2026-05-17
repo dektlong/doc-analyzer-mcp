@@ -1,0 +1,30 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Development / IDE
+.env
+.env.*
+.cursor/
+.vscode/
+*.ipynb_checkpoints/
+notebook.ipynb
+
+# Lock files
+uv.lock
+
+# Tests
+tests/
+
+# Docs
+*.md

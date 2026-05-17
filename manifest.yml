@@ -1,0 +1,18 @@
+---
+# Optional environment variable:
+#   EMBEDDING_DIMENSION – override vector size if your model dimension ≠ 1536
+
+applications:
+  - name: doc-analyzer-mcp
+    memory: 1G
+    buildpacks:
+      - python_buildpack
+
+    routes:
+      - route: doc-analyzer-mcp.apps.internal
+
+    services:
+      - document-db
+      - document-embedding
+      - document-chat 
+      - dekt-mcp-gw

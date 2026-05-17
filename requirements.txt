@@ -1,0 +1,11 @@
+# requirements.txt — Cloud Foundry deployment
+# All models are provided via CF service bindings (VCAP_SERVICES).
+# Exact versions mirror the pre-downloaded wheels in vendor/ so pip
+# installs offline (--find-links vendor/ --no-index) during staging.
+
+fastmcp==3.3.1
+mcp==1.27.1
+psycopg2-binary==2.9.12
+openai==2.37.0
+python-dotenv==1.2.2
+pypdf==6.11.0
