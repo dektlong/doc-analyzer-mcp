@@ -11,6 +11,8 @@ Parses VCAP_SERVICES to extract credentials for:
 import json
 import logging
 import os
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -86,19 +88,54 @@ def get_postgres_uri() -> Optional[str]:
 # AI / GenAI model credentials
 # ---------------------------------------------------------------------------
 
+def _fetch_advertised_models(config_url: str, api_key: str) -> List[Dict[str, Any]]:
+    """
+    Query the Tanzu AI Services config_url to discover advertised models.
+
+    Per the multi-model plan binding format, the credential does not contain
+    the model name directly. Clients must call config_url to get an up-to-date
+    list of model names and their capabilities.
+
+    Reference:
+      https://techdocs.broadcom.com/us/en/vmware-tanzu/platform/ai-services/10-3/ai/explanation-single-vs-multi-model-plans.html
+    """
+    try:
+        req = urllib.request.Request(
+            config_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        models = data.get("advertisedModels", [])
+        logger.info(
+            "config_url advertised %d model(s): %s",
+            len(models),
+            [(m.get("name"), m.get("capabilities")) for m in models],
+        )
+        return models
+    except Exception as exc:
+        logger.warning("Failed to fetch advertised models from %s: %s", config_url, exc)
+        return []
+
+
 def get_model_config(model_type: str) -> Optional[Dict[str, Any]]:
     """
     Return normalised credentials for *model_type* ('chat' or 'embedding').
 
-    Searches every service binding in VCAP_SERVICES — not just known AI labels —
-    trying multiple credential shapes before giving up.
+    For Tanzu AI Services multi-model plans the model name is NOT in the
+    binding credentials — it is discovered by calling endpoint.config_url
+    and matching the capability ('EMBEDDING' or 'CHAT') in advertisedModels.
+
+    Searches every service binding in VCAP_SERVICES, trying multiple credential
+    shapes before giving up.
     """
     vcap = get_vcap_services()
 
-    # Collect every binding across all service labels
     all_bindings: List[Dict[str, Any]] = []
     for bindings in vcap.values():
         all_bindings.extend(bindings)
+
+    capability = model_type.upper()  # "EMBEDDING" or "CHAT"
 
     for binding in all_bindings:
         creds = binding.get("credentials", {})
@@ -108,6 +145,15 @@ def get_model_config(model_type: str) -> Optional[Dict[str, Any]]:
         if extracted:
             normalized = _normalize_model_creds(extracted)
             if normalized.get("api_base"):
+                # Tanzu multi-model plan: fetch the real model name from config_url
+                config_url = extracted.get("config_url")
+                if config_url and normalized.get("api_key"):
+                    advertised = _fetch_advertised_models(config_url, normalized["api_key"])
+                    for m in advertised:
+                        if capability in m.get("capabilities", []):
+                            normalized["model_name"] = m["name"]
+                            break
+
                 logger.info(
                     "Found %s model in service '%s': api_base=%s model=%s",
                     model_type,
@@ -163,8 +209,8 @@ def _extract_model_creds(creds: Dict[str, Any], model_type: str) -> Optional[Dic
 def _normalize_model_creds(creds: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "api_base": (
-            creds.get("openai_api_base")
-            or creds.get("api_base")
+            creds.get("api_base")
+            or creds.get("openai_api_base")
             or creds.get("url")
             or creds.get("base_url")
             or creds.get("endpoint")
@@ -176,11 +222,12 @@ def _normalize_model_creds(creds: Dict[str, Any]) -> Dict[str, Any]:
             or creds.get("access_key")
             or "not-needed"
         ),
+        # model_name is intentionally left None for Tanzu multi-model plans;
+        # it will be populated from config_url in get_model_config().
         "model_name": (
             creds.get("model_name")
             or creds.get("model")
             or creds.get("deployment_name")
             or creds.get("model_id")
-            or creds.get("name")  # Tanzu endpoint.name field
         ),
     }

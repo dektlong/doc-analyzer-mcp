@@ -111,10 +111,8 @@ class RAGServer:
             base_url=embedding_cfg["api_base"],
             api_key=embedding_cfg["api_key"],
         )
-        # Env vars let operators pick specific models when the plan provides many
         embedding_model = (
-            os.getenv("EMBEDDING_MODEL_NAME")
-            or embedding_cfg.get("model_name")
+            embedding_cfg.get("model_name")
             or "text-embedding-ada-002"
         )
         embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
