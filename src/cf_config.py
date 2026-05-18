@@ -208,9 +208,13 @@ def _extract_model_creds(creds: Dict[str, Any], model_type: str) -> Optional[Dic
 
 def _normalize_model_creds(creds: Dict[str, Any]) -> Dict[str, Any]:
     return {
+        # Per Tanzu AI Services docs, openai_api_base = {api_base}/openai and
+        # is the correct root for OpenAI-compatible routes. Callers must still
+        # append /v1 before passing to the OpenAI SDK (see rag_server.py).
+        # Fall back to api_base for service bindings that pre-date openai_api_base.
         "api_base": (
-            creds.get("api_base")
-            or creds.get("openai_api_base")
+            creds.get("openai_api_base")
+            or creds.get("api_base")
             or creds.get("url")
             or creds.get("base_url")
             or creds.get("endpoint")

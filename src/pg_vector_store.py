@@ -58,9 +58,31 @@ class PgVectorCollection:
     # ------------------------------------------------------------------
 
     def _ensure_schema(self) -> None:
-        """Create the table and index if they do not already exist."""
+        """Create the table and index, recreating them if the vector dimension changed."""
         with self._conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+            # Check whether the table already exists with a different dimension.
+            # pg_attribute.atttypmod stores the declared dimension for vector columns.
+            cur.execute(
+                """
+                SELECT a.atttypmod
+                FROM   pg_attribute a
+                JOIN   pg_class     c ON c.oid = a.attrelid
+                WHERE  c.relname = %s
+                  AND  a.attname = 'embedding'
+                  AND  a.attnum  > 0
+                """,
+                (self._table,),
+            )
+            row = cur.fetchone()
+            if row is not None and row[0] != self._embedding_dimension:
+                logger.info(
+                    "Table %s has vector(%d) but need vector(%d) — dropping and recreating.",
+                    self._table, row[0], self._embedding_dimension,
+                )
+                cur.execute(f"DROP TABLE IF EXISTS {self._table} CASCADE")
+
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {self._table} (
@@ -74,9 +96,7 @@ class PgVectorCollection:
             )
             # Drop legacy IVFFlat index if it exists (requires lists >= row count,
             # so it breaks on small tables).
-            cur.execute(
-                f"DROP INDEX IF EXISTS {self._table}_emb_idx"
-            )
+            cur.execute(f"DROP INDEX IF EXISTS {self._table}_emb_idx")
             # HNSW works correctly at any dataset size and has better recall.
             cur.execute(
                 f"""
@@ -86,7 +106,7 @@ class PgVectorCollection:
                 """
             )
         self._conn.commit()
-        logger.debug("Schema ensured for table %s", self._table)
+        logger.debug("Schema ensured for table %s (dim=%d)", self._table, self._embedding_dimension)
 
     # ------------------------------------------------------------------
     # Embedding helpers
@@ -122,22 +142,26 @@ class PgVectorCollection:
 
         embeddings = self._embed(documents)
 
-        with self._conn.cursor() as cur:
-            for doc_id, content, embedding, metadata in zip(
-                ids, documents, embeddings, metadatas
-            ):
-                cur.execute(
-                    f"""
-                    INSERT INTO {self._table} (id, content, embedding, metadata)
-                    VALUES (%s, %s, %s::vector, %s)
-                    ON CONFLICT (id) DO UPDATE
-                        SET content   = EXCLUDED.content,
-                            embedding = EXCLUDED.embedding,
-                            metadata  = EXCLUDED.metadata
-                    """,
-                    (doc_id, content, str(embedding), json.dumps(metadata)),
-                )
-        self._conn.commit()
+        try:
+            with self._conn.cursor() as cur:
+                for doc_id, content, embedding, metadata in zip(
+                    ids, documents, embeddings, metadatas
+                ):
+                    cur.execute(
+                        f"""
+                        INSERT INTO {self._table} (id, content, embedding, metadata)
+                        VALUES (%s, %s, %s::vector, %s)
+                        ON CONFLICT (id) DO UPDATE
+                            SET content   = EXCLUDED.content,
+                                embedding = EXCLUDED.embedding,
+                                metadata  = EXCLUDED.metadata
+                        """,
+                        (doc_id, content, str(embedding), json.dumps(metadata)),
+                    )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
         logger.debug("Upserted %d documents into %s", len(documents), self._table)
 
     def query(
@@ -190,9 +214,13 @@ class PgVectorCollection:
 
     def count(self) -> int:
         """Return the number of documents in the collection."""
-        with self._conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {self._table}")
-            return cur.fetchone()[0]
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {self._table}")
+                return cur.fetchone()[0]
+        except Exception:
+            self._conn.rollback()
+            return 0
 
     def get(self, include: Optional[List[str]] = None) -> Dict[str, Any]:
         """Return all documents (without embeddings)."""
@@ -244,13 +272,35 @@ class PgVectorClient:
         self._conn = psycopg2.connect(db_uri)
         self._embedding_client = embedding_client
         self._embedding_model = embedding_model
-        self._embedding_dimension = embedding_dimension
+        self._embedding_dimension = self._detect_dimension(embedding_dimension)
         self._collections: Dict[str, PgVectorCollection] = {}
         logger.info(
             "PgVectorClient connected. Embedding model: %s (%d dims)",
             embedding_model,
-            embedding_dimension,
+            self._embedding_dimension,
         )
+
+    def _detect_dimension(self, fallback: int) -> int:
+        """
+        Probe the embedding API with a short test string to discover the actual
+        vector dimension. This avoids hard-coding a dimension that may not match
+        the deployed model (e.g. nomic-embed-text-v2-moe returns 768, not 1536).
+        """
+        try:
+            response = self._embedding_client.embeddings.create(
+                model=self._embedding_model,
+                input=["dimension probe"],
+                encoding_format="float",
+            )
+            dim = len(response.data[0].embedding)
+            logger.info("Auto-detected embedding dimension: %d", dim)
+            return dim
+        except Exception as exc:
+            logger.warning(
+                "Could not auto-detect embedding dimension (%s) — using fallback %d",
+                exc, fallback,
+            )
+            return fallback
 
     def _table_name(self, collection_name: str) -> str:
         return collection_name.lower().replace("-", "_").replace(" ", "_")

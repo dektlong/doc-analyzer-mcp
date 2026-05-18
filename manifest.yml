@@ -13,6 +13,6 @@ applications:
 
     services:
       - document-db
-      - document-embedding
-      - document-chat 
+      - document-chat-embedding
+      #- document-chat 
       - dekt-mcp-gw

@@ -11,10 +11,12 @@ Documents are read from the documents/ directory at startup and on reingest.
 
 import logging
 import os
+import ssl
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
+import httpx
 from fastmcp import FastMCP
 from openai import OpenAI
 
@@ -107,21 +109,38 @@ class RAGServer:
         if not self._chat_model_config:
             logger.warning("No chat model binding found in VCAP_SERVICES.")
 
+        # Per Tanzu AI Services docs:
+        #   openai_api_base = {api_base}/openai   (no /v1)
+        #   inference URL   = {openai_api_base}/v1/embeddings
+        # The OpenAI Python SDK appends /embeddings to base_url, so we must
+        # supply {openai_api_base}/v1 as base_url to get the right final path.
+        # Guard against credentials that already include /v1.
+        #
+        # httpx uses certifi's CA bundle by default, which does not include the
+        # TAS platform's internal CA. ssl.create_default_context() uses the
+        # system CA store (where CF injects platform CAs), matching the
+        # behaviour of urllib used in cf_config.py for the config_url fetch.
+        _oai_root = embedding_cfg["api_base"].rstrip("/")
+        openai_base = _oai_root if _oai_root.endswith("/v1") else _oai_root + "/v1"
+        ssl_ctx = ssl.create_default_context()
         embedding_client = OpenAI(
-            base_url=embedding_cfg["api_base"],
+            base_url=openai_base,
             api_key=embedding_cfg["api_key"],
+            http_client=httpx.Client(verify=ssl_ctx),
         )
         embedding_model = (
             embedding_cfg.get("model_name")
             or "text-embedding-ada-002"
         )
-        embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
+        # Dimension is auto-detected from the API inside PgVectorClient;
+        # EMBEDDING_DIMENSION env var can still override it as a fallback.
+        embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "0")) or None
 
         self._db_client = PgVectorClient(
             db_uri=db_uri,
             embedding_client=embedding_client,
             embedding_model=embedding_model,
-            embedding_dimension=embedding_dimension,
+            **({"embedding_dimension": embedding_dimension} if embedding_dimension else {}),
         )
 
         self.collection = self._db_client.create_collection(
